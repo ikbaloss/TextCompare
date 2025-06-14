@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text Comparison Scatter Plot</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            text-align: center;
+        }
+        .file-input, .search-input, .custom-words-input {
+            margin: 10px;
+        }
+        #plot {
+            margin-top: 20px;
+        }
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            pointer-events: none;
+        }
+        svg {
+            border: 1px solid #ccc;
+        }
+        .node-label {
+            font-size: 12px;
+            fill: black;
+            pointer-events: none;
+        }
+        .button-group {
+            margin: 10px;
+        }
+        #sentence-table, #keyword-table, #collocate-table {
+            margin: 20px auto;
+            max-width: 800px;
+            border-collapse: collapse;
+        }
+        #sentence-table th, #sentence-table td, #keyword-table th, #keyword-table td, #collocate-table th, #collocate-table td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+            vertical-align: top;
+            max-width: 250px;
+            word-wrap: break-word;
+        }
+        #keyword-table th, #collocate-table th {
+            cursor: pointer;
+            background-color: #f4f4f4;
+        }
+        #keyword-table th:hover, #collocate-table th:hover {
+            background-color: #e0e0e0;
+        }
+        #sentence-table th {
+            background-color: #f4f4f4;
+        }
+        #combineButton, #saveCSVButton, #closeSentenceTable, #saveSentenceCSVButton, #savePNGButton, #removeNumbersBtn, #removeCustomWordsBtn, #toggleCollocatesBtn {
+            margin: 10px;
+            padding: 5px 10px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Text Comparison Scatter Plot</h1>
+    <div class="file-input">
+        <label for="text1">Upload First Text File: </label>
+        <input type="file" id="text1" accept=".txt">
+    </div>
+    <div class="file-input">
+        <label for="text2">Upload Second Text File: </label>
+        <input type="file" id="text2" accept=".txt">
+    </div>
+    <div class="file-input">
+        <label for="stopwords">Upload Stopwords File (optional): </label>
+        <input type="file" id="stopwords" accept=".txt">
+    </div>
+    <div class="file-input">
+        <label for="topN">Number of Top Words to Compare (default 50): </label>
+        <input type="number" id="topN" value="50" min="1">
+    </div>
+    <div class="search-input">
+        <label for="searchWord">Search Word: </label>
+        <input type="text" id="searchWord" placeholder="Enter a word">
+        <button onclick="searchWord()">Search</button>
+    </div>
+    <div class="custom-words-input">
+        <label for="customWordsInput">Custom Words to Remove (comma or space separated): </label>
+        <input type="text" id="customWordsInput" placeholder="e.g., car, data_set">
+        <button id="removeCustomWordsBtn" onclick="toggleCustomWords()">Remove Custom Words</button>
+    </div>
+    <div class="button-group">
+        <button id="generatePlotBtn">Generate Scatter Plot</button>
+        <button onclick="showAllLabels()">Show All</button>
+        <button onclick="hideAllLabels()">Hide All</button>
+        <button id="scaleButton" onclick="toggleLogScale()">Linear Scale</button>
+        <button onclick="flipAxes()">Flip</button>
+        <button id="toggleKeywordButton" onclick="toggleKeywords()">Show Keywords</button>
+        <button id="savePNGButton" onclick="savePlot()">Save as PNG</button>
+        <button id="removeNumbersBtn" onclick="toggleNumbers()">Remove Numbers</button>
+    </div>
+    <div id="plot"></div>
+    <div id="sentence-table-container"></div>
+    <div id="keyword-table-container"></div>
+
+    <script>
+        console.log('Script parsing started');
+
+        let currentData = [];
+        let originalData = [];
+        let counts1 = {};
+        let counts2 = {};
+        let xScale = null;
+        let yScale = null;
+        let svg = null;
+        let tooltip = null;
+        let isLogScale = true;
+        let isFlipped = false;
+        let stopwords = [];
+        let text1Name = '';
+        let text2Name = '';
+        let text1Content = '';
+        let text2Content = '';
+        let isKeywordTableVisible = false;
+        let isCombinedTable = false;
+        let isNumbersRemoved = false;
+        let isCustomWordsRemoved = false;
+        let customWords = [];
+        let sortConfig = { column: 'keyword', ascending: true };
+        let currentWord = '';
+        let wordFormsMap = {};
+        let allWordsSet = new Set();
+        let isCollocateView = false;
+
+        async function readFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsText(file);
+            });
+        }
+
+        function getSingularForm(word, wordsSet) {
+            if (!word || typeof word !== 'string') {
+                console.warn('Invalid word in getSingularForm:', word);
+                return word;
+            }
+            if (word.endsWith('s') && word.length > 1 && !word.includes('-') && !word.includes('_')) {
+                const singular = word.slice(0, -1);
+                if (wordsSet.has(singular)) {
+                    return singular;
+                }
+            }
+            return word;
+        }
+
+        function processText(text) {
+            text = text.toLowerCase();
+            text = text.replace(/[^a-z0-9\-_]/g, ' ');
+            const wordRegex = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$|^\d+$/;
+            const words = text.split(/\s+/).filter(word => word.length > 0 && wordRegex.test(word));
+            allWordsSet = new Set(words);
+            wordFormsMap = {};
+            const singularWords = words.map(word => {
+                if (/^\d+$/.test(word)) return word;
+                const singular = getSingularForm(word, allWordsSet);
+                if (singular !== word) {
+                    wordFormsMap[word] = singular;
+                }
+                return singular;
+            });
+            return singularWords;
+        }
+
+        function countWords(words) {
+            const wordCounts = {};
+            words.forEach(word => {
+                wordCounts[word] = (wordCounts[word] || 0) + 1;
+            });
+            return wordCounts;
+        }
+
+        function getTopNWords(wordCounts, n, stopwords = [], removeNumbers = false, customWords = []) {
+            return Object.entries(wordCounts)
+                .filter(([word]) => !stopwords.includes(word.toLowerCase()))
+                .filter(([word]) => !removeNumbers || !/^\d+$/.test(word))
+                .filter(([word]) => {
+                    if (!customWords.length) return true;
+                    const singular = getSingularForm(word, allWordsSet);
+                    return !customWords.includes(singular) && !customWords.includes(singular + 's');
+                })
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, n)
+                .map(entry => ({ word: entry[0], freq: entry[1] }));
+        }
+
+        function getDotColor(freq1, freq2, isSearched) {
+            let theta = Math.atan2(freq2, freq1) * (180 / Math.PI);
+            if (theta < 0) theta += 360;
+            if (theta > 90) theta = 90;
+            let r, g, b;
+            if (theta <= 45) {
+                const t = theta / 45;
+                r = Math.round(255 * t);
+                g = Math.round(255 * (1 - t));
+                b = 0;
+            } else {
+                const t = (theta - 45) / 45;
+                r = Math.round(255 * (1 - t));
+                g = 0;
+                b = Math.round(255 * t);
+            }
+            return `rgb(${r},${g},${b})`;
+        }
+
+        function getSentencesWithWord(content, word) {
+            const forms = [word];
+            if (!/^\d+$/.test(word)) {
+                const plural = word + 's';
+                if (allWordsSet.has(plural) || counts1[plural] || counts2[plural]) {
+                    forms.push(plural);
+                }
+            }
+            const escapedForms = forms.map(f => f.replace(/[-_]/g, match => `\\${match}`));
+            const wordRegex = new RegExp(`\\b(${escapedForms.join('|')})\\b`, 'gi');
+            let sentences = [];
+            if (content.includes('.')) {
+                sentences = content.split(/\.\s+/).filter(s => s.trim().length > 0);
+            } else if (content.includes('\n')) {
+                const paragraphs = content.split(/\n+/).filter(p => p.trim().length > 0);
+                if (paragraphs.length > 1) sentences = paragraphs;
+            }
+            if (sentences.length > 0) {
+                return sentences.filter(sentence => wordRegex.test(sentence));
+            }
+            const words = content.split(/\s+/).filter(w => w.length > 0);
+            const contexts = [];
+            for (let i = 0; i < words.length; i++) {
+                if (words[i].match(wordRegex)) {
+                    const start = Math.max(0, i - 10);
+                    const end = Math.min(words.length, i + 11);
+                    const context = words.slice(start, end).join(' ');
+                    contexts.push(context);
+                }
+            }
+            return contexts;
+        }
+
+        function getCollocates(content, word, stopwords) {
+            const sentences = getSentencesWithWord(content, word);
+            const wordRegex = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$|^\d+$/;
+            const collocateCounts = {};
+            const forms = [word];
+            if (!/^\d+$/.test(word)) {
+                const plural = word + 's';
+                if (allWordsSet.has(plural) || counts1[plural] || counts2[plural]) {
+                    forms.push(plural);
+                }
+            }
+            const keywordRegex = new RegExp(`\\b(${forms.map(f => f.replace(/[-_]/g, '\\$&')).join('|')})\\b`, 'gi');
+            sentences.forEach(sentence => {
+                const words = sentence.toLowerCase()
+                    .replace(/[^a-z0-9\-_]/g, ' ')
+                    .split(/\s+/)
+                    .filter(w => w.length > 0 && wordRegex.test(w) && !stopwords.includes(w.toLowerCase()));
+                const uniqueWords = new Set(words);
+                uniqueWords.forEach(w => {
+                    if (!forms.includes(w)) {
+                        collocateCounts[w] = (collocateCounts[w] || 0) + 1;
+                    }
+                });
+            });
+            return Object.entries(collocateCounts)
+                .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+                .slice(0, 10)
+                .map(([word, count]) => ({ word, count }));
+        }
+
+        function toggleCollocateView() {
+            isCollocateView = !isCollocateView;
+            const button = document.getElementById('toggleCollocatesBtn');
+            button.textContent = isCollocateView ? 'Show Sentences' : 'Show Colocates';
+            if (isCollocateView) {
+                generateCollocateTable(currentWord);
+            } else {
+                generateSentenceTable(currentWord);
+            }
+        }
+
+        function closeSentenceTable() {
+            document.getElementById('sentence-table-container').innerHTML = '';
+            currentWord = '';
+            isCollocateView = false;
+        }
+
+        function saveTableAsCSV() {
+            console.log("Saving table CSV for word:", currentWord, "View:", isCollocateView ? "Collocates" : "Sentences");
+            if (!currentWord) {
+                console.warn("No word selected for table CSV.");
+                alert("No table available to save.");
+                return;
+            }
+            let csvContent = `${escapeCSVField(text1Name)},${escapeCSVField(text2Name)}\n`;
+            let filename;
+            if (isCollocateView) {
+                const collocates1 = getCollocates(text1Content, currentWord, stopwords);
+                const collocates2 = getCollocates(text2Content, currentWord, stopwords);
+                const maxRows = Math.max(collocates1.length, collocates2.length);
+                if (maxRows === 0) {
+                    console.warn("No collocates available for CSV.");
+                    alert("No collocates to save for this word.");
+                    return;
+                }
+                filename = `collocates_${currentWord}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+                for (let i = 0; i < maxRows; i++) {
+                    const cell1 = collocates1[i] ? `${escapeCSVField(collocates1[i].word)} (${collocates1[i].count})` : '';
+                    const cell2 = collocates2[i] ? `${escapeCSVField(collocates2[i].word)} (${collocates2[i].count})` : '';
+                    csvContent += `${cell1},${cell2}\n`;
+                }
+            } else {
+                const sentences1 = getSentencesWithWord(text1Content, currentWord);
+                const sentences2 = getSentencesWithWord(text2Content, currentWord);
+                const maxRows = Math.max(sentences1.length, sentences2.length);
+                if (maxRows === 0) {
+                    console.warn("No sentences available for CSV.");
+                    alert("No sentences to save for this word.");
+                    return;
+                }
+                filename = `sentences_${currentWord}_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+                for (let i = 0; i < maxRows; i++) {
+                    const cell1 = sentences1[i] ? escapeCSVField(sentences1[i]) : '';
+                    const cell2 = sentences2[i] ? escapeCSVField(sentences2[i]) : '';
+                    csvContent += `${cell1},${cell2}\n`;
+                }
+            }
+            try {
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                const url = URL.createObjectURL(blob);
+                link.setAttribute('href', url);
+                link.setAttribute('download', filename);
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                console.log("CSV download initiated:", filename);
+            } catch (error) {
+                console.error("Error saving CSV:", error);
+                alert("Error saving CSV. Please check the console for details.");
+            }
+        }
+
+        function generateSentenceTable(word) {
+            currentWord = word;
+            const container = document.getElementById('sentence-table-container');
+            container.innerHTML = '';
+            const sentences1 = getSentencesWithWord(text1Content, word);
+            const sentences2 = getSentencesWithWord(text2Content, word);
+            const freq1 = sentences1.length;
+            const freq2 = sentences2.length;
+            const maxRows = Math.max(freq1, freq2);
+            if (maxRows === 0) {
+                container.innerHTML = `<p>No sentences found containing "${word}" or its plural form.</p>`;
+                currentWord = '';
+                isCollocateView = false;
+                return;
+            }
+            const closeButton = document.createElement('button');
+            closeButton.id = 'closeSentenceTable';
+            closeButton.textContent = 'Close Table';
+            closeButton.onclick = closeSentenceTable;
+            container.appendChild(closeButton);
+            const saveButton = document.createElement('button');
+            saveButton.id = 'saveSentenceCSVButton';
+            saveButton.textContent = 'Save as CSV';
+            saveButton.onclick = saveTableAsCSV;
+            container.appendChild(saveButton);
+            const toggleCollocatesButton = document.createElement('button');
+            toggleCollocatesButton.id = 'toggleCollocatesBtn';
+            toggleCollocatesButton.textContent = 'Show Colocates';
+            toggleCollocatesButton.onclick = toggleCollocateView;
+            container.appendChild(toggleCollocatesButton);
+            const table = document.createElement('table');
+            table.id = 'sentence-table';
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            const header1 = document.createElement('th');
+            const header2 = document.createElement('th');
+            header1.textContent = `${text1Name}: ${word} (${freq1})`;
+            header2.textContent = `${text2Name}: ${word} (${freq2})`;
+            headerRow.appendChild(header1);
+            headerRow.appendChild(header2);
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            const forms = [word];
+            if (!/^\d+$/.test(word)) {
+                const plural = word + 's';
+                if (allWordsSet.has(plural) || counts1[plural] || counts2[plural]) {
+                    forms.push(plural);
+                }
+            }
+            const escapedForms = forms.map(f => f.replace(/[-_]/g, match => `\\${match}`));
+            const wordRegex = new RegExp(`\\b(${escapedForms.join('|')})\\b`, 'gi');
+            for (let i = 0; i < maxRows; i++) {
+                const row = document.createElement('tr');
+                const cell1 = document.createElement('td');
+                const cell2 = document.createElement('td');
+                cell1.innerHTML = sentences1[i] ? sentences1[i].replace(wordRegex, `<span style="color: red">$1</span>`) : '';
+                cell2.innerHTML = sentences2[i] ? sentences2[i].replace(wordRegex, `<span style="color: red">$1</span>`) : '';
+                row.appendChild(cell1);
+                row.appendChild(cell2);
+                tbody.appendChild(row);
+            }
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
+        function generateCollocateTable(word) {
+            currentWord = word;
+            const container = document.getElementById('sentence-table-container');
+            container.innerHTML = '';
+            const collocates1 = getCollocates(text1Content, word, stopwords);
+            const collocates2 = getCollocates(text2Content, word, stopwords);
+            const sentences1 = getSentencesWithWord(text1Content, word);
+            const sentences2 = getSentencesWithWord(text2Content, word);
+            const freq1 = sentences1.length;
+            const freq2 = sentences2.length;
+            const maxRows = Math.max(collocates1.length, collocates2.length);
+            if (maxRows === 0) {
+                container.innerHTML = `<p>No collocates found for "${word}" or its plural form.</p>`;
+                currentWord = '';
+                isCollocateView = false;
+                return;
+            }
+            const closeButton = document.createElement('button');
+            closeButton.id = 'closeSentenceTable';
+            closeButton.textContent = 'Close Table';
+            closeButton.onclick = closeSentenceTable;
+            container.appendChild(closeButton);
+            const saveButton = document.createElement('button');
+            saveButton.id = 'saveSentenceCSVButton';
+            saveButton.textContent = 'Save as CSV';
+            saveButton.onclick = saveTableAsCSV;
+            container.appendChild(saveButton);
+            const toggleCollocatesButton = document.createElement('button');
+            toggleCollocatesButton.id = 'toggleCollocatesBtn';
+            toggleCollocatesButton.textContent = 'Show Sentences';
+            toggleCollocatesButton.onclick = toggleCollocateView;
+            container.appendChild(toggleCollocatesButton);
+            const table = document.createElement('table');
+            table.id = 'collocate-table';
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            const header1 = document.createElement('th');
+            const header2 = document.createElement('th');
+            header1.textContent = `${text1Name}: ${word} (${freq1})`;
+            header2.textContent = `${text2Name}: ${word} (${freq2})`;
+            headerRow.appendChild(header1);
+            headerRow.appendChild(header2);
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            const keywordSet = new Set(currentData.map(d => d.word));
+            for (let i = 0; i < maxRows; i++) {
+                const row = document.createElement('tr');
+                const cell1 = document.createElement('td');
+                const cell2 = document.createElement('td');
+                if (collocates1[i]) {
+                    const { word, count } = collocates1[i];
+                    const isKeyword = keywordSet.has(word);
+                    cell1.innerHTML = `<span style="color: ${isKeyword ? 'red' : 'black'}">${word}</span> (${count})`;
+                }
+                if (collocates2[i]) {
+                    const { word, count } = collocates2[i];
+                    const isKeyword = keywordSet.has(word);
+                    cell2.innerHTML = `<span style="color: ${isKeyword ? 'red' : 'black'}">${word}</span> (${count})`;
+                }
+                row.appendChild(cell1);
+                row.appendChild(cell2);
+                tbody.appendChild(row);
+            }
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
+        function sortTable(data, column, ascending) {
+            return data.sort((a, b) => {
+                if (column === 'keyword') {
+                    return ascending ? a.word.localeCompare(b.word) : b.word.localeCompare(b.word);
+                } else if (column === 'freq1') {
+                    if (a.freq1 !== b.freq1) return ascending ? a.freq1 - b.freq1 : b.freq1 - a.freq1;
+                    return a.word.localeCompare(b.word);
+                } else if (column === 'freq2') {
+                    if (a.freq2 !== b.freq2) return ascending ? a.freq2 - b.freq2 : b.freq2 - a.freq2;
+                    return a.word.localeCompare(b.word);
+                }
+            });
+        }
+
+        function escapeCSVField(field) {
+            if (typeof field === 'undefined' || field === null) return '';
+            const str = field.toString();
+            if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                return `"${str.replace(/"/g, '""')}"`;
+            }
+            return str;
+        }
+
+        function saveKeywordTableAsCSV() {
+            console.log("Saving CSV for", isCombinedTable ? "three-column" : "two-column");
+            let csvContent = '';
+            let filename = `keywords_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+            if (isCombinedTable) {
+                const allWords = [...new Set([...getTopNWords(counts1, parseInt(document.getElementById('topN').value) || 50, stopwords, isNumbersRemoved, customWords).map(w => w.word), ...getTopNWords(counts2, parseInt(document.getElementById('topN').value) || 50, stopwords, isNumbersRemoved, customWords).map(w => w.word)])];
+                if (allWords.length === 0) {
+                    console.warn("No keywords available for CSV.");
+                    alert("No keywords to save. Please check your input or filters.");
+                    return;
+                }
+                let keywordData = allWords.map(word => ({
+                    word,
+                    freq1: counts1[word] || 0,
+                    freq2: counts2[word] || 0
+                }));
+                keywordData = sortTable(keywordData, sortConfig.column, sortConfig.ascending);
+                csvContent += `Keyword,${escapeCSVField(text1Name)},${escapeCSVField(text2Name)}\n`;
+                keywordData.forEach(d => {
+                    csvContent += `${escapeCSVField(d.word)},${d.freq1},${d.freq2}\n`;
+                });
+            } else {
+                const topN = parseInt(document.getElementById('topN').value) || 50;
+                const topWords1 = getTopNWords(counts1, topN, stopwords, isNumbersRemoved, customWords);
+                const topWords2 = getTopNWords(counts2, topN, stopwords, isNumbersRemoved, customWords);
+                const maxRows = Math.max(topWords1.length, topWords2.length);
+                if (maxRows === 0) {
+                    console.warn("No keywords available for CSV.");
+                    alert("No keywords to save. Please check your input or filters.");
+                    return;
+                }
+                csvContent += `${escapeCSVField(text1Name)},${escapeCSVField(text2Name)}\n`;
+                for (let i = 0; i < maxRows; i++) {
+                    const cell1 = topWords1[i] ? `${escapeCSVField(topWords1[i].word)} (${topWords1[i].freq})` : '';
+                    const cell2 = topWords2[i] ? `${escapeCSVField(topWords2[i].word)} (${topWords2[i].freq})` : '';
+                    csvContent += `${cell1},${cell2}\n`;
+                }
+            }
+            try {
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                const url = URL.createObjectURL(blob);
+                link.setAttribute('href', url);
+                link.setAttribute('download', filename);
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                console.log("CSV download initiated:", filename);
+            } catch (error) {
+                console.error("Error saving CSV:", error);
+                alert("Error saving CSV. Please check the console for details.");
+            }
+        }
+
+        function savePlot() {
+            console.log("Initiating PNG download for scatter plot");
+            if (!svg || !d3.select("#plot").select("svg").node()) {
+                console.warn("No scatter plot available to save.");
+                alert("Please generate the scatter plot first.");
+                return;
+            }
+            try {
+                const svgElement = d3.select("#plot").select("svg").node();
+                const width = parseInt(svgElement.getAttribute("width"));
+                const height = parseInt(svgElement.getAttribute("height"));
+                const serializer = new XMLSerializer();
+                let svgString = serializer.serializeToString(svgElement);
+                svgString = svgString.replace(/<svg([^>]*)>/, '<svg$1 xmlns="http://www.w3.org/2000/svg">');
+                const svgData = encodeURIComponent(svgString);
+                const img = new Image();
+                img.src = `data:image/svg+xml;charset=utf-8,${svgData}`;
+                img.onload = function() {
+                    const canvas = document.createElement("canvas");
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext("2d");
+                    ctx.fillStyle = "white";
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0);
+                    const pngData = canvas.toDataURL("image/png");
+                    const filename = `scatter_plot_${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+                    const link = document.createElement('a');
+                    link.href = pngData;
+                    link.download = filename;
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    console.log("PNG download completed:", filename);
+                };
+                img.onerror = function() {
+                    console.error("Error loading SVG for PNG export.");
+                    alert("Failed to export plot as PNG. Please check the console.");
+                };
+            } catch (error) {
+                console.error("Error saving PNG:", error);
+                alert("Error saving PNG. Please check the console for details.");
+            }
+        }
+
+        function renderTwoColumnTable(topWords1, topWords2) {
+            const container = document.getElementById('keyword-table-container');
+            const maxRows = Math.max(topWords1.length, topWords2.length);
+            if (maxRows === 0) {
+                container.innerHTML = `<p>No keywords found after applying filters.</p>`;
+                document.getElementById('toggleKeywordButton').textContent = 'Show Keywords';
+                isKeywordTableVisible = false;
+                isCombinedTable = false;
+                return false;
+            }
+            const combineButton = document.createElement('button');
+            combineButton.id = 'combineButton';
+            combineButton.textContent = 'Combine';
+            combineButton.onclick = combineKeywords;
+            container.appendChild(combineButton);
+            const saveButton = document.createElement('button');
+            saveButton.id = 'saveCSVButton';
+            saveButton.textContent = 'Save as CSV';
+            saveButton.onclick = saveKeywordTableAsCSV;
+            container.appendChild(saveButton);
+            const table = document.createElement('table');
+            table.id = 'keyword-table';
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            const header1 = document.createElement('th');
+            const header2 = document.createElement('th');
+            header1.textContent = text1Name;
+            header2.textContent = text2Name;
+            headerRow.appendChild(header1);
+            headerRow.appendChild(header2);
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            for (let i = 0; i < maxRows; i++) {
+                const row = document.createElement('tr');
+                const cell1 = document.createElement('td');
+                const cell2 = document.createElement('td');
+                cell1.textContent = topWords1[i] ? `${topWords1[i].word} (${topWords1[i].freq})` : '';
+                cell2.textContent = topWords2[i] ? `${topWords2[i].word} (${topWords2[i].freq})` : '';
+                row.appendChild(cell1);
+                row.appendChild(cell2);
+                tbody.appendChild(row);
+            }
+            table.appendChild(tbody);
+            container.appendChild(table);
+            return true;
+        }
+
+        function renderThreeColumnTable(keywordData) {
+            const container = document.getElementById('keyword-table-container');
+            if (!keywordData || keywordData.length === 0) {
+                container.innerHTML = `<p>No keywords found after applying filters.</p>`;
+                document.getElementById('toggleKeywordButton').textContent = 'Show Keywords';
+                isKeywordTableVisible = false;
+                isCombinedTable = false;
+                return;
+            }
+            const combineButton = document.createElement('button');
+            combineButton.id = 'combineButton';
+            combineButton.textContent = 'Split';
+            combineButton.onclick = combineKeywords;
+            container.appendChild(combineButton);
+            const saveButton = document.createElement('button');
+            saveButton.id = 'saveCSVButton';
+            saveButton.textContent = 'Save as CSV';
+            saveButton.onclick = saveKeywordTableAsCSV;
+            container.appendChild(saveButton);
+            const table = document.createElement('table');
+            table.id = 'keyword-table';
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            const headers = [
+                { text: 'Keyword', column: 'keyword' },
+                { text: text1Name, column: 'freq1' },
+                { text: text2Name, column: 'freq2' }
+            ];
+            headers.forEach(h => {
+                const th = document.createElement('th');
+                th.textContent = h.text;
+                th.onclick = () => {
+                    if (h.column === 'keyword') {
+                        sortConfig.ascending = sortConfig.column === 'keyword' ? !sortConfig.ascending : true;
+                    } else {
+                        sortConfig.ascending = false;
+                    }
+                    sortConfig.column = h.column;
+                    const sortedData = sortTable([...keywordData], sortConfig.column, sortConfig.ascending);
+                    table.querySelector('tbody').remove();
+                    const tbody = document.createElement('tbody');
+                    sortedData.forEach(d => {
+                        const row = document.createElement('tr');
+                        const cell1 = document.createElement('td');
+                        const cell2 = document.createElement('td');
+                        const cell3 = document.createElement('td');
+                        cell1.textContent = d.word;
+                        cell2.textContent = d.freq1;
+                        cell3.textContent = d.freq2;
+                        row.appendChild(cell1);
+                        row.appendChild(cell2);
+                        row.appendChild(cell3);
+                        tbody.appendChild(row);
+                    });
+                    table.appendChild(tbody);
+                };
+                headerRow.appendChild(th);
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            const sortedData = sortTable([...keywordData], sortConfig.column, sortConfig.ascending);
+            sortedData.forEach(d => {
+                const row = document.createElement('tr');
+                const cell1 = document.createElement('td');
+                const cell2 = document.createElement('td');
+                const cell3 = document.createElement('td');
+                cell1.textContent = d.word;
+                cell2.textContent = d.freq1;
+                cell3.textContent = d.freq2;
+                row.appendChild(cell1);
+                row.appendChild(cell2);
+                row.appendChild(cell3);
+                tbody.appendChild(row);
+            });
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
+        function toggleKeywords() {
+            const button = document.getElementById('toggleKeywordButton');
+            const container = document.getElementById('keyword-table-container');
+            if (!svg || !counts1 || !counts2) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            if (isKeywordTableVisible) {
+                container.innerHTML = '';
+                button.textContent = 'Show Keywords';
+                isKeywordTableVisible = false;
+                isCombinedTable = false;
+            } else {
+                container.innerHTML = '';
+                const topN = parseInt(document.getElementById('topN').value) || 50;
+                const topWords1 = getTopNWords(counts1, topN, stopwords, isNumbersRemoved, customWords);
+                const topWords2 = getTopNWords(counts2, topN, stopwords, isNumbersRemoved, customWords);
+                if (topWords1.length === 0 && topWords2.length === 0) {
+                    container.innerHTML = `<p>No keywords found after applying filters.</p>`;
+                    button.textContent = 'Show Keywords';
+                    isKeywordTableVisible = false;
+                    isCombinedTable = false;
+                    return;
+                }
+                if (isCombinedTable) {
+                    const allWords = [...new Set([...topWords1.map(w => w.word), ...topWords2.map(w => w.word)])];
+                    const keywordData = allWords.map(word => ({
+                        word,
+                        freq1: counts1[word] || 0,
+                        freq2: counts2[word] || 0
+                    }));
+                    renderThreeColumnTable(keywordData);
+                } else {
+                    const success = renderTwoColumnTable(topWords1, topWords2);
+                    if (!success) return;
+                }
+                button.textContent = 'Hide Keywords';
+                isKeywordTableVisible = true;
+            }
+        }
+
+        function combineKeywords() {
+            const container = document.getElementById('keyword-table-container');
+            container.innerHTML = '';
+            const topN = parseInt(document.getElementById('topN').value) || 50;
+            const topWords1 = getTopNWords(counts1, topN, stopwords, isNumbersRemoved, customWords);
+            const topWords2 = getTopNWords(counts2, topN, stopwords, isNumbersRemoved, customWords);
+            isCombinedTable = !isCombinedTable;
+            if (isCombinedTable) {
+                const allWords = [...new Set([...topWords1.map(w => w.word), ...topWords2.map(w => w.word)])];
+                const keywordData = allWords.map(word => ({
+                    word,
+                    freq1: counts1[word] || 0,
+                    freq2: counts2[word] || 0
+                }));
+                renderThreeColumnTable(keywordData);
+            } else {
+                renderTwoColumnTable(topWords1, topWords2);
+            }
+            document.getElementById('toggleKeywordButton').textContent = 'Hide Keywords';
+            isKeywordTableVisible = true;
+        }
+
+        function toggleNumbers() {
+            if (!svg || !currentData.length) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            isNumbersRemoved = !isNumbersRemoved;
+            const button = document.getElementById('removeNumbersBtn');
+            if (isNumbersRemoved) {
+                if (!originalData.length) originalData = JSON.parse(JSON.stringify(currentData));
+                currentData = currentData.filter(d => !/^\d+$/.test(d.word));
+                button.textContent = 'Show Numbers';
+            } else {
+                if (isCustomWordsRemoved && originalData.length) {
+                    currentData = originalData.filter(d => {
+                        const singular = getSingularForm(d.word, allWordsSet);
+                        return !customWords.includes(singular) && !customWords.includes(singular + 's');
+                    });
+                } else {
+                    currentData = JSON.parse(JSON.stringify(originalData));
+                }
+                originalData = [];
+                button.textContent = 'Remove Numbers';
+            }
+            updatePlot();
+            if (isKeywordTableVisible) {
+                toggleKeywords();
+                toggleKeywords();
+            }
+        }
+
+        function toggleCustomWords() {
+            if (!svg || !currentData.length) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            const input = document.getElementById('customWordsInput').value.trim().toLowerCase();
+            const wordRegex = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$|^\d+$/;
+            const words = input
+                .split(/[,;\s]+/)
+                .map(w => w.trim())
+                .filter(w => w.length > 0 && wordRegex.test(w) && typeof w === 'string');
+            console.log('Parsed custom words:', words);
+            if (!words.length && !isCustomWordsRemoved) {
+                alert("Please enter at least one valid word or number (e.g., 'car, data_set, 123').");
+                return;
+            }
+            isCustomWordsRemoved = !isCustomWordsRemoved;
+            const button = document.getElementById('removeCustomWordsBtn');
+            if (isCustomWordsRemoved) {
+                customWords = words.map(word => /^\d+$/.test(word) ? word : getSingularForm(word, allWordsSet));
+                console.log('Processed customWords:', customWords);
+                if (!originalData.length) originalData = JSON.parse(JSON.stringify(currentData));
+                currentData = currentData.filter(d => {
+                    const singular = getSingularForm(d.word, allWordsSet);
+                    return !customWords.includes(singular) && !customWords.includes(singular + 's');
+                });
+                button.textContent = 'Show Custom Words';
+            } else {
+                if (isNumbersRemoved && originalData.length) {
+                    currentData = originalData.filter(d => !/^\d+$/.test(d.word));
+                } else {
+                    currentData = JSON.parse(JSON.stringify(originalData));
+                }
+                originalData = [];
+                customWords = [];
+                button.textContent = 'Remove Custom Words';
+            }
+            updatePlot();
+            if (isKeywordTableVisible) {
+                toggleKeywords();
+                toggleKeywords();
+            }
+        }
+
+        function checkLabelOverlap(newLabelNode, newLabelData, baseX, baseY) {
+            const labels = svg.selectAll(".node-label").nodes();
+            const labelData = labels.map((label, i) => ({
+                node: label,
+                data: currentData[i],
+                bbox: label.getBBox()
+            }));
+            const positions = [
+                { x: baseX + 8, y: baseY, anchor: 'start' }, // Right
+                { x: baseX, y: baseY - 12, anchor: 'middle' }, // Above
+                { x: baseX, y: baseY + 12, anchor: 'middle' }, // Below
+                { x: baseX - 8, y: baseY, anchor: 'end' } // Left
+            ];
+            let selectedPosition = null;
+            const newLabelSelection = d3.select(newLabelNode);
+            const margin = { top: 40, right: 40, bottom: 60, left: 60 };
+            const width = 600 - margin.left - margin.right;
+            const height = 600 - margin.top - margin.bottom;
+
+            for (const pos of positions.slice(0, 3)) {
+                newLabelSelection
+                    .attr("x", pos.x)
+                    .attr("y", pos.y)
+                    .attr("text-anchor", pos.anchor);
+                const newBBox = newLabelNode.getBBox();
+                const isOutOfBounds = (
+                    newBBox.x < -margin.left ||
+                    newBBox.x + newBBox.width > width + margin.right ||
+                    newBBox.y < -margin.top ||
+                    newBBox.y + newBBox.height > height + margin.bottom
+                );
+                if (isOutOfBounds) {
+                    continue;
+                }
+                let overlaps = false;
+                for (const ld of labelData) {
+                    if (ld.data.showLabel && ld.data !== newLabelData) {
+                        const ldBox = ld.bbox;
+                        if (
+                            newBBox.x < ldBox.x + ldBox.width &&
+                            newBBox.x + newBBox.width > ldBox.x &&
+                            newBBox.y < ldBox.y + ldBox.height &&
+                            newBBox.y + newBBox.height > ldBox.y
+                        ) {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+                }
+                if (!overlaps) {
+                    selectedPosition = pos;
+                    break;
+                }
+            }
+            if (selectedPosition) {
+                newLabelSelection
+                    .attr("x", selectedPosition.x)
+                    .attr("y", selectedPosition.y)
+                    .attr("text-anchor", selectedPosition.anchor)
+                    .style("display", "block");
+                newLabelData.showLabel = true;
+            } else {
+                newLabelSelection.style("display", "none");
+                newLabelData.showLabel = false;
+                const overlappingIndices = [];
+                labelData.forEach((ld, i) => {
+                    if (ld.data.showLabel && ld.data !== newLabelData) {
+                        const ldBox = ld.bbox;
+                        const newBBox = newLabelNode.getBBox();
+                        if (
+                            newBBox.x < ldBox.x + ldBox.width &&
+                            newBBox.x + newBBox.width > ldBox.x &&
+                            newBBox.y < ldBox.y + ldBox.height &&
+                            newBBox.y + newBBox.height > ldBox.y
+                        ) {
+                            overlappingIndices.push(i);
+                        }
+                    }
+                });
+                if (overlappingIndices.length > 0) {
+                    const group = [...overlappingIndices, currentData.indexOf(newLabelData)];
+                    let maxFreq = -1;
+                    let selectedIdx = group[0];
+                    for (const idx of group) {
+                        const freq = currentData[idx].freq1 + currentData[idx].freq2;
+                        if (freq > maxFreq) {
+                            maxFreq = freq;
+                            selectedIdx = idx;
+                        }
+                    }
+                    group.forEach(idx => {
+                        if (idx !== selectedIdx) {
+                            currentData[idx].showLabel = false;
+                            d3.select(labels[idx]).style("display", "none");
+                        }
+                    });
+                }
+            }
+        }
+
+        function resolveLabelOverlaps() {
+            const labels = svg.selectAll(".node-label").nodes();
+            const labelData = labels
+                .map((label, i) => ({
+                    node: label,
+                    data: currentData[i],
+                    bbox: label.getBBox()
+                }))
+                .filter(ld => ld.data.showLabel);
+            const overlaps = [];
+            for (let i = 0; i < labelData.length; i++) {
+                const a = labelData[i];
+                for (let j = i + 1; j < labelData.length; j++) {
+                    const b = labelData[j];
+                    const aBox = a.bbox;
+                    const bBox = b.bbox;
+                    if (
+                        aBox.x < bBox.x + bBox.width &&
+                        aBox.x + aBox.width > bBox.x &&
+                        aBox.y < bBox.y + bBox.height &&
+                        aBox.y + aBox.height > bBox.y
+                    ) {
+                        overlaps.push([i, j]);
+                    }
+                }
+            }
+            const groups = [];
+            const visited = new Set();
+            function findGroup(idx) {
+                if (visited.has(idx)) return;
+                const group = new Set([idx]);
+                visited.add(idx);
+                let queue = [idx];
+                while (queue.length) {
+                    const current = queue.shift();
+                    for (const [i, j] of overlaps) {
+                        if (i === current && !visited.has(j)) {
+                            group.add(j);
+                            queue.push(j);
+                            visited.add(j);
+                        } else if (j === current && !visited.has(i)) {
+                            group.add(i);
+                            queue.push(i);
+                            visited.add(i);
+                        }
+                    }
+                }
+                if (group.size > 1) groups.push([...group]);
+            }
+            for (let i = 0; i < labelData.length; i++) {
+                findGroup(i);
+            }
+            for (const group of groups) {
+                let maxFreq = -1;
+                let selectedIdx = group[0];
+                for (const idx of group) {
+                    const freq = labelData[idx].data.freq1 + labelData[idx].data.freq2;
+                    if (freq > maxFreq) {
+                        maxFreq = freq;
+                        selectedIdx = idx;
+                    }
+                }
+                group.forEach(idx => {
+                    if (idx !== selectedIdx) {
+                        labelData[idx].data.showLabel = false;
+                        d3.select(labelData[idx].node).style("display", "none");
+                    }
+                });
+            }
+        }
+
+        function updatePlot() {
+            if (!currentData.length) return;
+            svg.selectAll("*").remove();
+            const maxFreq1 = d3.max(currentData, d => d.freq1) || 1;
+            const maxFreq2 = d3.max(currentData, d => d.freq2) || 1;
+            const minFreq = 0.1;
+            const xDomain = isLogScale ? [minFreq, maxFreq1 + minFreq] : [-0.5, maxFreq1];
+            const yDomain = isLogScale ? [minFreq, maxFreq2 + minFreq] : [-0.5, maxFreq2];
+            const margin = { top: 40, right: 40, bottom: 60, left: 60 };
+            const width = 600 - margin.left - margin.right;
+            const height = 600 - margin.top - margin.bottom;
+            xScale = (isLogScale ? d3.scaleLog() : d3.scaleLinear())
+                .domain(isFlipped ? yDomain : xDomain)
+                .range([0, width]);
+            yScale = (isLogScale ? d3.scaleLog() : d3.scaleLinear())
+                .domain(isFlipped ? xDomain : yDomain)
+                .range([height, 0]);
+            svg.append("g")
+                .attr("transform", `translate(0,${height})`)
+                .call(d3.axisBottom(xScale))
+                .append("text")
+                .attr("x", width / 2)
+                .attr("y", 40)
+                .attr("fill", "black")
+                .text(isFlipped ? text2Name : text1Name);
+            svg.append("g")
+                .attr("transform", `translate(-10,0)`)
+                .call(d3.axisLeft(yScale))
+                .append("text")
+                .attr("transform", "rotate(-90)")
+                .attr("x", -height / 2)
+                .attr("y", -40)
+                .attr("fill", "black")
+                .text(isFlipped ? text1Name : text2Name);
+            const nodes = svg.selectAll(".node")
+                .data(currentData)
+                .enter()
+                .append("g")
+                .attr("class", "node");
+            nodes.each(function(d) {
+                const node = d3.select(this);
+                const baseX = xScale(isFlipped ? (isLogScale ? (d.freq2 + minFreq) : d.freq2) : (isLogScale ? (d.freq1 + minFreq) : d.freq1));
+                const baseY = yScale(isFlipped ? (isLogScale ? (d.freq1 + minFreq) : d.freq1) : (isLogScale ? (d.freq2 + minFreq) : d.freq2));
+                if (d.isStar) {
+                    node.append("path")
+                        .attr("d", d3.symbol().type(d3.symbolStar).size(100))
+                        .attr("transform", `translate(${baseX},${baseY})`)
+                        .attr("fill", d => getDotColor(d.freq1, d.freq2, false))
+                        .attr("color", d => getDotColor(d.freq1, d.freq2, false))
+                        .attr("opacity", 0.7)
+                        .on("mouseover", function(event, d) {
+                            d3.select(this).attr("fill", "orange");
+                            tooltip.transition().duration(100).style("opacity", 0.9);
+                            tooltip.html(`Word: ${d.word}<br>${text1Name}: ${d.freq1}<br>${text2Name}: ${d.freq2}`)
+                                .style("left", (event.pageX + 10) + "px")
+                                .style("top", (event.pageY - 28) + "px");
+                        })
+                        .on("mouseout", function(event, d) {
+                            d3.select(this).attr("fill", d3.select(this).attr("color"));
+                            tooltip.transition().duration(500).style("opacity", 0);
+                        })
+                        .on("click", function(event, d) {
+                            d.showLabel = !d.showLabel;
+                            const labelNode = d3.select(this.parentNode).select(".node-label")
+                                .style("display", d.showLabel ? "block" : "none")
+                                .node();
+                            if (d.showLabel && labelNode) {
+                                checkLabelOverlap(labelNode, d, baseX, baseY);
+                            }
+                            d3.select(this).attr("fill", d3.select(this).attr("color"));
+                        })
+                        .on("dblclick", function(event, d) {
+                            isCollocateView = false;
+                            generateSentenceTable(d.word);
+                        });
+                } else {
+                    node.append("circle")
+                        .attr("cx", baseX)
+                        .attr("cy", baseY)
+                        .attr("r", 5)
+                        .attr("fill", d => getDotColor(d.freq1, d.freq2, false))
+                        .attr("color", d => getDotColor(d.freq1, d.freq2, false))
+                        .attr("opacity", 0.7)
+                        .on("mouseover", function(event, d) {
+                            d3.select(this).attr("r", 8).attr("fill", "orange");
+                            tooltip.transition().duration(100).style("opacity", 0.9);
+                            tooltip.html(`Word: ${d.word}<br>${text1Name}: ${d.freq1}<br>${text2Name}: ${d.freq2}`)
+                                .style("left", (event.pageX + 10) + "px")
+                                .style("top", (event.pageY - 28) + "px");
+                        })
+                        .on("mouseout", function(event, d) {
+                            d3.select(this).attr("r", 5).attr("fill", d3.select(this).attr("color"));
+                            tooltip.transition().duration(500).style("opacity", 0);
+                        })
+                        .on("click", function(event, d) {
+                            d.showLabel = !d.showLabel;
+                            const labelNode = d3.select(this.parentNode).select(".node-label")
+                                .style("display", d.showLabel ? "block" : "none")
+                                .node();
+                            if (d.showLabel && labelNode) {
+                                checkLabelOverlap(labelNode, d, baseX, baseY);
+                            }
+                            d3.select(this).attr("fill", d3.select(this).attr("color"));
+                        })
+                        .on("dblclick", function(event, d) {
+                            isCollocateView = false;
+                            generateSentenceTable(d.word);
+                        });
+                }
+            });
+            nodes.append("text")
+                .attr("class", "node-label")
+                .attr("x", d => xScale(isFlipped ? (isLogScale ? (d.freq2 + minFreq) : d.freq2) : (isLogScale ? (d.freq1 + minFreq) : d.freq1)) + 8)
+                .attr("y", d => yScale(isFlipped ? (isLogScale ? (d.freq1 + minFreq) : d.freq1) : (isLogScale ? (d.freq2 + minFreq) : d.freq2)))
+                .attr("text-anchor", "start")
+                .text(d => d.word)
+                .style("display", d => d.showLabel ? "block" : "none");
+            if (currentData.some(d => d.showLabel)) {
+                resolveLabelOverlaps();
+            }
+        }
+
+        function showAllLabels() {
+            if (!svg) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            currentData.forEach(d => d.showLabel = true);
+            updatePlot();
+        }
+
+        function hideAllLabels() {
+            if (!svg) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            d3.selectAll(".node-label").style("display", "none");
+            currentData.forEach(d => d.showLabel = false);
+        }
+
+        function toggleLogScale() {
+            if (!svg) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            isLogScale = !isLogScale;
+            document.getElementById('scaleButton').textContent = isLogScale ? 'Linear Scale' : 'Log Scale';
+            updatePlot();
+        }
+
+        function flipAxes() {
+            if (!svg) {
+                alert("Please generate the plot first.");
+                return;
+            }
+            isFlipped = !isFlipped;
+            updatePlot();
+        }
+
+        function searchWord() {
+            console.log("searchWord called at", new Date().toISOString());
+            if (!svg || !currentData) {
+                alert("Please generate the scatter plot first.");
+                return;
+            }
+            let searchWordInput = document.getElementById('searchWord').value.trim().toLowerCase();
+            const wordRegex = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$|^\d+$/;
+            if (!searchWordInput.match(wordRegex)) {
+                alert("Please enter a valid word or number (e.g., 'deep-learning', '123').");
+                return;
+            }
+            const isNumber = /^\d+$/.test(searchWordInput);
+            const singularSearch = isNumber ? searchWordInput : getSingularForm(searchWordInput, allWordsSet);
+            searchWordInput = singularSearch;
+            currentData.forEach(d => {
+                d.isStar = false;
+                d.isSearched = false;
+            });
+            d3.selectAll(".node circle").attr("r", 5);
+            const existingNode = currentData.find(d => d.word === searchWordInput);
+            if (existingNode) {
+                existingNode.isStar = true;
+                existingNode.showLabel = true;
+                existingNode.isSearched = true;
+                const baseX = xScale(isFlipped ? (isLogScale ? (existingNode.freq2 + 0.1) : existingNode.freq2) : (isLogScale ? (existingNode.freq1 + 0.1) : existingNode.freq1));
+                const baseY = yScale(isFlipped ? (isLogScale ? (existingNode.freq1 + 0.1) : existingNode.freq1) : (isLogScale ? (existingNode.freq2 + 0.1) : existingNode.freq2));
+                const labelNode = d3.selectAll(".node")
+                    .filter(function(d) { return d.word === searchWordInput; })
+                    .select(".node-label")
+                    .style("display", "block")
+                    .node();
+                if (labelNode) {
+                    checkLabelOverlap(labelNode, existingNode, baseX, baseY);
+                }
+                updatePlot();
+            } else if (
+                counts1[searchWordInput] || counts2[searchWordInput] ||
+                (!isNumber && (counts1[searchWordInput + 's'] || counts2[searchWordInput + 's']))
+            ) {
+                const newNode = {
+                    word: searchWordInput,
+                    freq1: (counts1[searchWordInput] || 0) + (!isNumber ? (counts1[searchWordInput + 's'] || 0) : 0),
+                    freq2: (counts2[searchWordInput] || 0) + (!isNumber ? (counts2[searchWordInput + 's'] || 0) : 0),
+                    showLabel: true,
+                    isSearched: true,
+                    isStar: true
+                };
+                currentData.push(newNode);
+                updatePlot();
+            } else {
+                alert("The word or number (or its plural form) does not appear in either text.");
+            }
+        }
+
+        document.getElementById('generatePlotBtn').addEventListener('click', generatePlot);
+
+        async function generatePlot() {
+            console.log(`generatePlot called at ${new Date().toISOString()}`);
+            const text1File = document.getElementById('text1').files[0];
+            const text2File = document.getElementById('text2').files[0];
+            const stopwordsFile = document.getElementById('stopwords').files[0];
+            const topN = parseInt(document.getElementById('topN').value) || 50;
+            if (!text1File || !text2File) {
+                alert("Please upload both text files.");
+                return;
+            }
+            if (topN < 1) {
+                alert("Please enter a valid number of words (at least 1).");
+                return;
+            }
+            try {
+                text1Content = await readFile(text1File);
+                text2Content = await readFile(text2File);
+                text1Name = text1File.name.replace(/\.txt$/, '');
+                text2Name = text2File.name.replace(/\.txt$/, '');
+                stopwords = [];
+                if (stopwordsFile) {
+                    const stopwordsText = await readFile(stopwordsFile);
+                    stopwords = stopwordsText.toLowerCase().split('\n').map(word => word.trim()).filter(word => word.length > 0);
+                }
+                const words1 = processText(text1Content);
+                const words2 = processText(text2Content);
+                counts1 = countWords(words1);
+                counts2 = countWords(words2);
+                const topWords1 = getTopNWords(counts1, topN, stopwords);
+                const topWords2 = getTopNWords(counts2, topN, stopwords);
+                const allWords = [...new Set([...topWords1.map(w => w.word), ...topWords2.map(w => w.word)])];
+                currentData = allWords.map(word => ({
+                    word,
+                    freq1: counts1[word] || 0,
+                    freq2: counts2[word] || 0,
+                    showLabel: false,
+                    isSearched: false,
+                    isStar: false
+                }));
+                originalData = [];
+                isNumbersRemoved = false;
+                isCustomWordsRemoved = false;
+                customWords = [];
+                document.getElementById('removeNumbersBtn').textContent = 'Remove Numbers';
+                document.getElementById('removeCustomWordsBtn').textContent = 'Remove Custom Words';
+                document.getElementById('customWordsInput').value = '';
+                d3.select("#plot").selectAll("*").remove();
+                document.getElementById('sentence-table-container').innerHTML = '';
+                document.getElementById('keyword-table-container').innerHTML = '';
+                document.getElementById('toggleKeywordButton').textContent = 'Show Keywords';
+                isKeywordTableVisible = false;
+                isCombinedTable = false;
+                sortConfig = { column: 'keyword', ascending: true };
+                currentWord = '';
+                isCollocateView = false;
+                const margin = { top: 40, right: 40, bottom: 60, left: 60 };
+                const width = 600 - margin.left - margin.right;
+                const height = 600 - margin.top - margin.bottom;
+                svg = d3.select("#plot")
+                    .append("svg")
+                    .attr("width", width + margin.left + margin.right)
+                    .attr("height", height + margin.top + margin.bottom)
+                    .append("g")
+                    .attr("transform", `translate(${margin.left},${margin.top})`);
+                tooltip = d3.select("body")
+                    .append("div")
+                    .attr("class", "tooltip")
+                    .style("opacity", 0);
+                updatePlot();
+            } catch (error) {
+                console.error("Error processing files:", error);
+                alert("Error processing files. Please ensure files are valid text files.");
+            }
+        }
+
+        console.log('Script parsing completed');
+    </script>
+</body>
+</html>
